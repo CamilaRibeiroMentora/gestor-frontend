@@ -1,316 +1,405 @@
-const express = require("express");
-const axios = require("axios");
-const cors = require("cors");
-const session = require("express-session");
-require("dotenv").config();
+import { useState, useEffect, useRef } from "react";
 
-const app = express();
-app.set("trust proxy", 1);
-app.use(express.json());
-app.use(cors({
-  origin: process.env.FRONTEND_URL,
-  credentials: true,
-  methods: ["GET", "POST", "PUT", "DELETE"],
-  allowedHeaders: ["Content-Type", "Authorization"]
-}));
-app.use(session({
-  secret: process.env.SESSION_SECRET || "segredo-trocar",
-  resave: false,
-  saveUninitialized: false,
-  proxy: true,
-  cookie: {
-    secure: true,
-    sameSite: "none",
-    httpOnly: true,
-    maxAge: 24 * 60 * 60 * 1000
-  }
-}));
+const API = import.meta.env.VITE_API_URL || "http://localhost:3001";
 
-const META_APP_ID = process.env.META_APP_ID;
-const META_APP_SECRET = process.env.META_APP_SECRET;
-const REDIRECT_URI = process.env.REDIRECT_URI;
-const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+const SYSTEM_MSG = {
+  role: "assistant",
+  content: `Olá! 👋 Sou seu Gestor de Tráfego integrado ao Meta Ads.
 
-// ─── 1. LOGIN COM META ───────────────────────────────────────────────────────
+Com a integração ativa, posso:
+📣 **Criar campanhas** completas na sua conta
+🎯 **Segmentar públicos** por idade, gênero, interesses e localização  
+🎨 **Criar anúncios** com copy otimizada
+📊 **Listar e analisar** suas campanhas ativas
+⏸️ **Pausar ou ativar** campanhas
 
-app.get("/auth/meta", (req, res) => {
-  const scopes = "ads_management,ads_read,business_management";
-  const url = `https://www.facebook.com/v19.0/dialog/oauth?client_id=${META_APP_ID}&redirect_uri=${REDIRECT_URI}&scope=${scopes}&response_type=code`;
-  res.redirect(url);
-});
+É só me dizer o que você quer — em português mesmo!
 
-app.get("/auth/meta/callback", async (req, res) => {
-  const { code } = req.query;
-  try {
-    const tokenRes = await axios.get("https://graph.facebook.com/v19.0/oauth/access_token", {
-      params: {
-        client_id: META_APP_ID,
-        client_secret: META_APP_SECRET,
-        redirect_uri: REDIRECT_URI,
-        code,
-      },
-    });
-    req.session.accessToken = tokenRes.data.access_token;
+**Exemplo:** _"Cria uma campanha de leads para meu curso de inglês, orçamento R$30/dia, público 18 a 35 anos, todo Brasil"_`,
+};
 
-    const adAccountsRes = await axios.get("https://graph.facebook.com/v19.0/me/adaccounts", {
-      params: {
-        access_token: req.session.accessToken,
-        fields: "id,name,currency,account_status",
-      },
-    });
-    req.session.adAccounts = adAccountsRes.data.data;
-
-    req.session.save((err) => {
-      if (err) console.error("Erro ao salvar sessão:", err);
-      res.redirect(`${process.env.FRONTEND_URL}?logado=true`);
-    });
-  } catch (err) {
-    console.error("Erro no login:", err.response?.data || err.message);
-    res.redirect(`${process.env.FRONTEND_URL}?erro=login`);
-  }
-});
-
-app.get("/auth/status", (req, res) => {
-  if (req.session.accessToken) {
-    res.json({ logado: true, contas: req.session.adAccounts });
-  } else {
-    res.json({ logado: false });
-  }
-});
-
-app.post("/auth/logout", (req, res) => {
-  req.session.destroy();
-  res.json({ ok: true });
-});
-
-// ─── 2. CHAT COM IA ──────────────────────────────────────────────────────────
-
-const SYSTEM_PROMPT = `Você é um gestor de tráfego especialista em Meta Ads com acesso à API do Meta.
-Quando o usuário pedir para criar uma campanha, conjunto de anúncios ou anúncio, responda com um JSON estruturado assim:
-
-{
-  "acao": "criar_campanha" | "criar_conjunto" | "criar_anuncio" | "listar_campanhas" | "pausar_campanha" | "resposta",
-  "parametros": { ... parâmetros necessários ... },
-  "mensagem": "explicação em português do que vai ser feito"
+function Markdown({ text }) {
+  const html = text
+    .replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")
+    .replace(/_(.*?)_/g, "<em>$1</em>")
+    .replace(/\n/g, "<br/>");
+  return <span dangerouslySetInnerHTML={{ __html: html }} />;
 }
 
-Para "resposta" (quando apenas responder sem criar nada), use:
-{ "acao": "resposta", "parametros": {}, "mensagem": "sua resposta aqui" }
+function Message({ msg }) {
+  const isUser = msg.role === "user";
+  return (
+    <div style={{
+      display: "flex",
+      justifyContent: isUser ? "flex-end" : "flex-start",
+      marginBottom: 16,
+      gap: 10,
+      alignItems: "flex-start",
+      animation: "fadeUp 0.3s ease",
+    }}>
+      {!isUser && (
+        <div style={{
+          width: 36, height: 36, borderRadius: "50%",
+          background: "linear-gradient(135deg, #0866FF, #00C6FF)",
+          display: "flex", alignItems: "center", justifyContent: "center",
+          fontSize: 16, flexShrink: 0,
+        }}>🎯</div>
+      )}
+      <div style={{
+        maxWidth: "76%",
+        background: isUser ? "linear-gradient(135deg, #0866FF, #0052CC)" : "#fff",
+        color: isUser ? "#fff" : "#1a1a2e",
+        borderRadius: isUser ? "18px 18px 4px 18px" : "18px 18px 18px 4px",
+        padding: "12px 16px",
+        fontSize: 14,
+        lineHeight: 1.65,
+        boxShadow: isUser ? "0 4px 16px rgba(8,102,255,0.25)" : "0 2px 12px rgba(0,0,0,0.08)",
+      }}>
+        <Markdown text={msg.content} />
+        {msg.resultado?.campanhas && (
+          <CampanhasCard campanhas={msg.resultado.campanhas} />
+        )}
+        {msg.resultado?.id && (
+          <div style={{
+            marginTop: 10, background: "rgba(34,197,94,0.1)",
+            border: "1px solid rgba(34,197,94,0.3)",
+            borderRadius: 8, padding: "8px 12px",
+            fontSize: 12, color: "#16a34a", fontWeight: 600,
+          }}>
+            ✅ Criado com sucesso! ID: {msg.resultado.id}
+          </div>
+        )}
+      </div>
+      {isUser && (
+        <div style={{
+          width: 36, height: 36, borderRadius: "50%",
+          background: "linear-gradient(135deg, #667eea, #764ba2)",
+          display: "flex", alignItems: "center", justifyContent: "center",
+          fontSize: 16, flexShrink: 0,
+        }}>👤</div>
+      )}
+    </div>
+  );
+}
 
-Parâmetros para criar_campanha:
-- nome: string
-- objetivo: "OUTCOME_LEADS" | "OUTCOME_SALES" | "OUTCOME_TRAFFIC" | "OUTCOME_AWARENESS" | "OUTCOME_ENGAGEMENT"
-- status: "PAUSED" (sempre começar pausado para o usuário revisar)
+function CampanhasCard({ campanhas }) {
+  if (!campanhas?.length) return (
+    <div style={{ marginTop: 10, fontSize: 13, color: "#6b7db3" }}>
+      Nenhuma campanha encontrada.
+    </div>
+  );
+  return (
+    <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 8 }}>
+      {campanhas.map(c => (
+        <div key={c.id} style={{
+          background: "#f8faff", borderRadius: 10,
+          padding: "10px 14px", border: "1px solid #e0e7ff",
+        }}>
+          <div style={{ fontWeight: 700, fontSize: 13, color: "#1a1a2e" }}>{c.name}</div>
+          <div style={{ display: "flex", gap: 12, marginTop: 6, flexWrap: "wrap" }}>
+            <Badge label="Status" value={c.status} color={c.status === "ACTIVE" ? "#22c55e" : "#f59e0b"} />
+            <Badge label="Objetivo" value={c.objective?.replace("OUTCOME_", "")} color="#0866FF" />
+            {c.insights?.data?.[0] && <>
+              <Badge label="Gasto" value={`R$${parseFloat(c.insights.data[0].spend || 0).toFixed(2)}`} color="#7c3aed" />
+              <Badge label="CTR" value={`${parseFloat(c.insights.data[0].ctr || 0).toFixed(2)}%`} color="#059669" />
+            </>}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
 
-Parâmetros para criar_conjunto:
-- campanha_id: string (pedir ao usuário se não souber)
-- nome: string
-- orcamento_diario: number (em centavos, ex: 5000 = R$50)
-- data_inicio: string (formato: "2024-01-15T00:00:00-0300")
-- pais: string (ex: "BR")
-- idade_min: number
-- idade_max: number
-- genero: 0 (todos) | 1 (masculino) | 2 (feminino)
-- interesses: array de strings com nomes de interesses
+function Badge({ label, value, color }) {
+  return (
+    <span style={{
+      fontSize: 11, fontWeight: 600,
+      background: `${color}15`, color,
+      padding: "3px 8px", borderRadius: 6,
+    }}>
+      {label}: {value}
+    </span>
+  );
+}
 
-Parâmetros para criar_anuncio:
-- conjunto_id: string
-- nome: string
-- titulo: string
-- texto: string
-- url_destino: string
-- cta: "LEARN_MORE" | "SIGN_UP" | "SHOP_NOW" | "CONTACT_US" | "DOWNLOAD"
+function ContaSeletor({ contas, contaSelecionada, onChange }) {
+  return (
+    <select
+      value={contaSelecionada}
+      onChange={e => onChange(e.target.value)}
+      style={{
+        background: "#f0f4ff", border: "1px solid #e0e7ff",
+        borderRadius: 8, padding: "6px 12px",
+        fontSize: 12, color: "#374151", fontWeight: 600,
+        cursor: "pointer",
+      }}
+    >
+      {contas.map(c => (
+        <option key={c.id} value={c.id.replace("act_", "")}>
+          {c.name}
+        </option>
+      ))}
+    </select>
+  );
+}
 
-Parâmetros para listar_campanhas: {}
-Parâmetros para pausar_campanha: { campanha_id: string }
+export default function App() {
+  const [status, setStatus] = useState({ logado: false, contas: [] });
+  const [contaSelecionada, setContaSelecionada] = useState("");
+  const [messages, setMessages] = useState([SYSTEM_MSG]);
+  const [input, setInput] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [carregando, setCarregando] = useState(true);
+  const endRef = useRef(null);
+  const inputRef = useRef(null);
 
-Sempre responda em JSON válido, sem texto fora do JSON.`;
-
-app.post("/chat", async (req, res) => {
-  if (!req.session.accessToken) {
-    return res.status(401).json({ erro: "Não autenticado" });
-  }
-
-  const { mensagens, contaId } = req.body;
-  req.session.contaId = contaId || req.session.contaId;
-
-  try {
-    const iaRes = await axios.post(
-      "https://api.anthropic.com/v1/messages",
-      {
-        model: "claude-sonnet-4-20250514",
-        max_tokens: 1000,
-        system: SYSTEM_PROMPT,
-        messages: mensagens,
-      },
-      {
-        headers: {
-          "x-api-key": ANTHROPIC_API_KEY,
-          "anthropic-version": "2023-06-01",
-          "Content-Type": "application/json",
-        },
-      }
-    );
-
-    const textoIA = iaRes.data.content[0].text;
-    let resposta;
-    try {
-      resposta = JSON.parse(textoIA);
-    } catch {
-      return res.json({ mensagem: textoIA, acao: "resposta" });
-    }
-
-    if (resposta.acao === "resposta") {
-      return res.json(resposta);
-    }
-
-    const resultado = await executarAcaoMeta(
-      resposta.acao,
-      resposta.parametros,
-      req.session.accessToken,
-      req.session.contaId
-    );
-
-    res.json({ ...resposta, resultado });
-  } catch (err) {
-    console.error("Erro no chat:", err.response?.data || err.message);
-    res.status(500).json({ erro: "Erro interno", detalhe: err.message });
-  }
-});
-
-// ─── 3. AÇÕES NO META ADS ────────────────────────────────────────────────────
-
-async function executarAcaoMeta(acao, params, token, contaId) {
-  const base = `https://graph.facebook.com/v19.0`;
-
-  switch (acao) {
-    case "criar_campanha": {
-      const res = await axios.post(`${base}/act_${contaId}/campaigns`, {
-        name: params.nome,
-        objective: params.objetivo,
-        status: "PAUSED",
-        special_ad_categories: [],
-        access_token: token,
-      });
-      return { id: res.data.id, mensagem: `Campanha criada com ID: ${res.data.id}` };
-    }
-
-    case "criar_conjunto": {
-      let targeting = {
-        geo_locations: { countries: [params.pais || "BR"] },
-        age_min: params.idade_min || 18,
-        age_max: params.idade_max || 65,
-      };
-      if (params.genero && params.genero !== 0) {
-        targeting.genders = [params.genero];
-      }
-      if (params.interesses?.length > 0) {
-        const interessesIds = await buscarInteresses(params.interesses, token);
-        if (interessesIds.length > 0) {
-          targeting.flexible_spec = [{ interests: interessesIds }];
+  useEffect(() => {
+    fetch(`${API}/auth/status`, { credentials: "include" })
+      .then(r => r.json())
+      .then(data => {
+        setStatus(data);
+        if (data.contas?.[0]) {
+          setContaSelecionada(data.contas[0].id.replace("act_", ""));
         }
-      }
+      })
+      .catch(() => setStatus({ logado: false, contas: [] }))
+      .finally(() => setCarregando(false));
+  }, []);
 
-      const res = await axios.post(`${base}/${params.campanha_id}/adsets`, {
-        name: params.nome,
-        daily_budget: params.orcamento_diario,
-        bid_strategy: "LOWEST_COST_WITHOUT_CAP",
-        billing_event: "IMPRESSIONS",
-        optimization_goal: "LEAD_GENERATION",
-        start_time: params.data_inicio,
-        targeting,
-        status: "PAUSED",
-        access_token: token,
-      });
-      return { id: res.data.id, mensagem: `Conjunto criado com ID: ${res.data.id}` };
-    }
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, loading]);
 
-    case "criar_anuncio": {
-      const criativoRes = await axios.post(`${base}/act_${contaId}/adcreatives`, {
-        name: `${params.nome} - Criativo`,
-        object_story_spec: {
-          page_id: params.page_id,
-          link_data: {
-            message: params.texto,
-            link: params.url_destino,
-            name: params.titulo,
-            call_to_action: { type: params.cta },
-          },
-        },
-        access_token: token,
-      });
+  const logout = async () => {
+    await fetch(`${API}/auth/logout`, { method: "POST", credentials: "include" });
+    setStatus({ logado: false, contas: [] });
+    setMessages([SYSTEM_MSG]);
+  };
 
-      const anuncioRes = await axios.post(`${base}/act_${contaId}/ads`, {
-        name: params.nome,
-        adset_id: params.conjunto_id,
-        creative: { creative_id: criativoRes.data.id },
-        status: "PAUSED",
-        access_token: token,
-      });
-      return { id: anuncioRes.data.id, mensagem: `Anúncio criado com ID: ${anuncioRes.data.id}` };
-    }
+  const enviar = async () => {
+    const texto = input.trim();
+    if (!texto || loading) return;
+    setInput("");
 
-    case "listar_campanhas": {
-      const res = await axios.get(`${base}/act_${contaId}/campaigns`, {
-        params: {
-          fields: "id,name,status,objective,daily_budget,insights{spend,impressions,clicks,ctr}",
-          access_token: token,
-        },
-      });
-      return { campanhas: res.data.data };
-    }
+    const novasMensagens = [...messages, { role: "user", content: texto }];
+    setMessages(novasMensagens);
+    setLoading(true);
 
-    case "pausar_campanha": {
-      await axios.post(`${base}/${params.campanha_id}`, {
-        status: "PAUSED",
-        access_token: token,
-      });
-      return { mensagem: "Campanha pausada com sucesso" };
-    }
-
-    default:
-      return { mensagem: "Ação não reconhecida" };
-  }
-}
-
-async function buscarInteresses(nomes, token) {
-  const resultados = [];
-  for (const nome of nomes) {
     try {
-      const res = await axios.get(`https://graph.facebook.com/v19.0/search`, {
-        params: { type: "adinterest", q: nome, access_token: token },
+      const res = await fetch(`${API}/chat`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          mensagens: novasMensagens.filter(m => m.role !== "system").map(m => ({
+            role: m.role,
+            content: m.content,
+          })),
+          contaId: contaSelecionada,
+        }),
       });
-      if (res.data.data[0]) {
-        resultados.push({ id: res.data.data[0].id, name: res.data.data[0].name });
+
+      const data = await res.json();
+      
+      // Monta a mensagem de resposta
+      let conteudo = data.mensagem || "Pronto!";
+      if (data.resultado?.id) {
+        conteudo += `\n\n✅ Criado com sucesso! ID: ${data.resultado.id}`;
       }
-    } catch {}
-  }
-  return resultados;
+      if (data.resultado?.mensagem) {
+        conteudo += `\n${data.resultado.mensagem}`;
+      }
+
+      setMessages([...novasMensagens, {
+        role: "assistant",
+        content: conteudo,
+        resultado: data.resultado,
+      }]);
+    } catch (err) {
+      setMessages([...novasMensagens, {
+        role: "assistant",
+        content: "❌ Erro de conexão com o servidor. Verifique se o backend está online.",
+      }]);
+    } finally {
+      setLoading(false);
+      inputRef.current?.focus();
+    }
+  };
+
+  if (carregando) return (
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100vh", background: "#f0f4ff" }}>
+      <div style={{ textAlign: "center" }}>
+        <div style={{ fontSize: 40, marginBottom: 12 }}>🚀</div>
+        <div style={{ color: "#6b7db3", fontWeight: 600 }}>Carregando...</div>
+      </div>
+    </div>
+  );
+
+  return (
+    <div style={{
+      display: "flex", flexDirection: "column", height: "100vh",
+      fontFamily: "'DM Sans', 'Segoe UI', sans-serif",
+      background: "#f0f4ff",
+    }}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Syne:wght@700;800&display=swap');
+        @keyframes fadeUp { from { opacity:0; transform:translateY(10px); } to { opacity:1; transform:translateY(0); } }
+        @keyframes bounce { 0%,80%,100% { transform:scale(0.7); opacity:0.5; } 40% { transform:scale(1); opacity:1; } }
+        * { box-sizing: border-box; }
+        textarea { resize: none; font-family: inherit; }
+        textarea:focus, button:focus { outline: none; }
+        ::-webkit-scrollbar { width: 5px; }
+        ::-webkit-scrollbar-thumb { background: #c5cfe0; border-radius: 10px; }
+      `}</style>
+
+      {/* Header */}
+      <div style={{
+        background: "linear-gradient(135deg, #0a0f2c, #0f1a4a)",
+        padding: "14px 24px",
+        display: "flex", alignItems: "center", justifyContent: "space-between",
+        boxShadow: "0 4px 20px rgba(0,0,0,0.2)",
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <div style={{
+            width: 40, height: 40, borderRadius: 12,
+            background: "linear-gradient(135deg, #0866FF, #00C6FF)",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            fontSize: 20,
+          }}>🚀</div>
+          <div>
+            <div style={{ fontFamily: "'Syne', sans-serif", fontWeight: 800, fontSize: 15, color: "#fff" }}>
+              Gestor de Tráfego IA
+            </div>
+            <div style={{ fontSize: 11, color: "#6b7db3" }}>Meta Ads · Integrado</div>
+          </div>
+        </div>
+
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          {status.logado ? (
+            <>
+              {status.contas?.length > 0 && (
+                <ContaSeletor
+                  contas={status.contas}
+                  contaSelecionada={contaSelecionada}
+                  onChange={setContaSelecionada}
+                />
+              )}
+              <div style={{
+                display: "flex", alignItems: "center", gap: 6,
+                background: "rgba(34,197,94,0.15)", border: "1px solid rgba(34,197,94,0.3)",
+                borderRadius: 20, padding: "5px 12px",
+                fontSize: 12, color: "#4ade80", fontWeight: 600,
+              }}>
+                <span style={{ width: 6, height: 6, borderRadius: "50%", background: "#22c55e", display: "inline-block" }} />
+                Meta conectado
+              </div>
+              <button onClick={logout} style={{
+                background: "rgba(255,255,255,0.08)", border: "1px solid rgba(255,255,255,0.1)",
+                borderRadius: 8, padding: "6px 14px",
+                fontSize: 12, color: "#8fa3d4", cursor: "pointer", fontWeight: 500,
+              }}>
+                Sair
+              </button>
+            </>
+          ) : (
+            <a href={`${API}/auth/meta`} style={{
+              background: "linear-gradient(135deg, #0866FF, #0052CC)",
+              color: "#fff", padding: "9px 20px", borderRadius: 10,
+              fontSize: 13, fontWeight: 700, textDecoration: "none",
+              display: "flex", alignItems: "center", gap: 8,
+            }}>
+              <span style={{ fontSize: 16 }}>f</span>
+              Conectar com Facebook
+            </a>
+          )}
+        </div>
+      </div>
+
+      {!status.logado && (
+        <div style={{
+          background: "linear-gradient(135deg, #fef3c7, #fef9e7)",
+          border: "1px solid #fde68a",
+          padding: "12px 24px",
+          display: "flex", alignItems: "center", gap: 10,
+          fontSize: 13, color: "#92400e",
+        }}>
+          <span style={{ fontSize: 18 }}>⚠️</span>
+          <span>
+            <strong>Conecte sua conta do Facebook</strong> para criar campanhas. Sem a conexão, posso apenas responder perguntas sobre Meta Ads.
+          </span>
+        </div>
+      )}
+
+      {/* Messages */}
+      <div style={{ flex: 1, overflowY: "auto", padding: "24px 28px" }}>
+        {messages.map((msg, i) => <Message key={i} msg={msg} />)}
+        {loading && (
+          <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+            <div style={{
+              width: 36, height: 36, borderRadius: "50%",
+              background: "linear-gradient(135deg, #0866FF, #00C6FF)",
+              display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16,
+            }}>🎯</div>
+            <div style={{ background: "#fff", borderRadius: "18px 18px 18px 4px", padding: "14px 18px", boxShadow: "0 2px 12px rgba(0,0,0,0.08)" }}>
+              {[0, 1, 2].map(i => (
+                <span key={i} style={{
+                  width: 8, height: 8, borderRadius: "50%", background: "#0866FF",
+                  display: "inline-block", margin: "0 3px",
+                  animation: `bounce 1.2s ease-in-out ${i * 0.2}s infinite`,
+                }} />
+              ))}
+            </div>
+          </div>
+        )}
+        <div ref={endRef} />
+      </div>
+
+      {/* Input */}
+      <div style={{
+        background: "#fff", borderTop: "1px solid #e8edf8",
+        padding: "16px 24px", boxShadow: "0 -4px 16px rgba(0,0,0,0.04)",
+      }}>
+        <div style={{
+          display: "flex", gap: 12, alignItems: "flex-end",
+          background: "#f6f8ff", border: "2px solid #e0e7ff",
+          borderRadius: 16, padding: "10px 10px 10px 18px",
+        }}>
+          <textarea
+            ref={inputRef}
+            value={input}
+            onChange={e => setInput(e.target.value)}
+            onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); enviar(); } }}
+            placeholder={status.logado
+              ? "Ex: Cria uma campanha de leads, R$50/dia, público 25-40 anos..."
+              : "Faça uma pergunta sobre Meta Ads..."}
+            rows={1}
+            style={{
+              flex: 1, background: "transparent", border: "none",
+              fontSize: 14, color: "#1a1a2e", lineHeight: 1.6,
+              maxHeight: 120, overflowY: "auto", padding: "2px 0",
+            }}
+            onInput={e => {
+              e.target.style.height = "auto";
+              e.target.style.height = Math.min(e.target.scrollHeight, 120) + "px";
+            }}
+          />
+          <button
+            onClick={enviar}
+            disabled={!input.trim() || loading}
+            style={{
+              width: 42, height: 42, borderRadius: 12, border: "none",
+              background: input.trim() && !loading ? "linear-gradient(135deg, #0866FF, #0052CC)" : "#e0e7ff",
+              color: input.trim() && !loading ? "#fff" : "#a5b4d0",
+              cursor: input.trim() && !loading ? "pointer" : "not-allowed",
+              display: "flex", alignItems: "center", justifyContent: "center",
+              fontSize: 18, flexShrink: 0,
+            }}
+          >↑</button>
+        </div>
+        <div style={{ fontSize: 11, color: "#b0bcd4", textAlign: "center", marginTop: 8 }}>
+          Enter para enviar · Shift+Enter para nova linha
+        </div>
+      </div>
+    </div>
+  );
 }
-
-// ─── 4. MÉTRICAS ─────────────────────────────────────────────────────────────
-
-app.get("/metricas/:contaId", async (req, res) => {
-  if (!req.session.accessToken) return res.status(401).json({ erro: "Não autenticado" });
-  try {
-    const { contaId } = req.params;
-    const metricasRes = await axios.get(
-      `https://graph.facebook.com/v19.0/act_${contaId}/insights`,
-      {
-        params: {
-          fields: "spend,impressions,clicks,ctr,cpm,cpp,actions",
-          date_preset: "last_7d",
-          access_token: req.session.accessToken,
-        },
-      }
-    );
-    res.json(metricasRes.data.data[0] || {});
-  } catch (err) {
-    res.status(500).json({ erro: err.message });
-  }
-});
-
-// ─── INICIAR SERVIDOR ────────────────────────────────────────────────────────
-
-const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => console.log(`✅ Servidor rodando na porta ${PORT}`));
